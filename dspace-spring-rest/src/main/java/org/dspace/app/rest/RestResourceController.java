@@ -10,14 +10,17 @@ package org.dspace.app.rest;
 import static org.springframework.hateoas.mvc.ControllerLinkBuilder.linkTo;
 
 import java.io.Serializable;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import org.apache.commons.lang3.StringUtils;
 import org.atteo.evo.inflector.English;
 import org.dspace.app.rest.exception.PaginationException;
-import org.dspace.app.rest.exception.RepositoryNotFoundException;
-import org.dspace.app.rest.model.BitstreamRest;
+import org.dspace.app.rest.exception.RepositorySearchMethodNotFoundException;
+import org.dspace.app.rest.exception.RepositorySearchNotFoundException;
 import org.dspace.app.rest.model.RestModel;
 import org.dspace.app.rest.model.hateoas.DSpaceResource;
 import org.dspace.app.rest.repository.DSpaceRestRepository;
@@ -32,7 +35,6 @@ import org.springframework.data.web.PagedResourcesAssembler;
 import org.springframework.hateoas.Link;
 import org.springframework.hateoas.PagedResources;
 import org.springframework.hateoas.ResourceSupport;
-import org.springframework.hateoas.core.EvoInflectorRelProvider;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
@@ -142,6 +144,74 @@ public class RestResourceController implements InitializingBean {
 			resources = new PageImpl<DSpaceResource<T>>(new ArrayList<DSpaceResource<T>>(), page, pe.getTotal());
 		}
 		PagedResources<DSpaceResource<T>> result = assembler.toResource(resources, link);
+		result.add(linkTo(this.getClass(), model).slash("search").withRel("search"));
 		return result;
+	}
+	
+	@RequestMapping(method = RequestMethod.GET, value="/search")
+	ResourceSupport listSearchMethods(@PathVariable String model) {
+		ResourceSupport root = new ResourceSupport();
+		DSpaceRestRepository repository = utils.getResourceRepository(model);
+		boolean searchEnabled = false;
+		for (Method method : repository.getClass().getMethods()) {
+			SearchRestMethod ann = method.getAnnotation(SearchRestMethod.class);
+			if (ann != null) {
+				String name = ann.name();
+				if (name.isEmpty()) {
+					name = method.getName();
+				}
+				Link link = linkTo(this.getClass(), model).slash("search").slash(name).withRel(name);
+				root.add(link);
+				searchEnabled = true;
+			}
+		}
+		if (!searchEnabled) {
+			throw new RepositorySearchNotFoundException(model);
+		}
+		return root;
+	}
+	
+	
+	@RequestMapping(method = RequestMethod.GET, value="/search/{searchMethod}")
+	@SuppressWarnings("unchecked")
+	<T extends RestModel> PagedResources<DSpaceResource<T>> executeSearchMethods(@PathVariable String model, @PathVariable String searchMethod, Pageable page, PagedResourcesAssembler assembler, @RequestParam(required=false) String projection) throws IllegalAccessException, IllegalArgumentException, InvocationTargetException {
+		Link link = linkTo(this.getClass(), model).slash("search").slash(searchMethod).withSelfRel();
+		DSpaceRestRepository repository = utils.getResourceRepository(model);
+		Page<DSpaceResource<T>> resources = null;
+		boolean searchEnabled = false;
+		boolean searchMethodFound = false;
+		for (Method method : repository.getClass().getMethods()) {
+			SearchRestMethod ann = method.getAnnotation(SearchRestMethod.class);
+			if (ann != null) {
+				searchEnabled = true;
+				String name = ann.name();
+				if (name.isEmpty()) {
+					name = method.getName();
+				}
+				if (StringUtils.equals(name, searchMethod)) {
+					searchMethodFound = true;
+				}
+				
+				resources = ((Page<T>) method.invoke(repository, page)).map(repository::wrapResource);
+			}
+		}
+		if (!searchMethodFound && searchEnabled) {
+			throw new RepositorySearchMethodNotFoundException(model, searchMethod);
+		}
+		if (!searchEnabled) {
+			throw new RepositorySearchNotFoundException(model);
+		}
+		PagedResources<DSpaceResource<T>> result = assembler.toResource(resources, link);
+		return result;
+	}
+	
+	private boolean haveSearchMethods(DSpaceRestRepository repository) {
+		for (Method method : repository.getClass().getMethods()) {
+			SearchRestMethod ann = method.getAnnotation(SearchRestMethod.class);
+			if (ann != null) {
+				return true;
+			}
+		}
+		return false;
 	}
 }
